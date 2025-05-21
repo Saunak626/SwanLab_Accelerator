@@ -1,3 +1,7 @@
 pytorch-template/
 data/
 train_test.py
+*pyc 
+*pkl
+*bin
+*pt

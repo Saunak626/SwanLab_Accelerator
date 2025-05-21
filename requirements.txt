@@ -17,5 +17,15 @@ pytz==2025.2
 sympy==1.13.1
 tqdm==4.67.1
 XlsxWriter==3.2.3
+
+deepspeed
 accelerate
+omegaconf
+pyyaml
 swanlab
+# torch
+# torchvision
+# torchaudio
+# numpy
+# scikit-learn
+# Add other necessary packages here
