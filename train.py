@@ -1,17 +1,12 @@
 import datetime
 import src.datasets.base_dataset as datasets
 import src.optimizers.optim as optimizers
-
 from src.models.net import *
 
 #=================== torch ======================
 import torch
 import torch.nn as nn
-# import torch.optim as optim
-
 from torch.utils.data import DataLoader
-# from torchvision import models
-
 #================= accelerate ===================
 from accelerate import Accelerator
 from accelerate.utils import set_seed
@@ -20,21 +15,24 @@ from accelerate.logging import get_logger
 import swanlab
 from swanlab.integration.accelerate import SwanLabTracker
 
-
 # 训练函数
 def train(dataloader, model, loss_fn, accelerator, device, optimizer, lr_scheduler, epoch):
     # train model
     model.train()
     
     if accelerator.is_local_main_process:
-        # print(f'{epoch}:{batch_idx}', accelerator.is_main_process, batch_idx, inputs.device, targets.device, next(model.parameters()).device)
-        
-        print(f"begin epoch {epoch} training...")
+        print(f"Begin epoch {epoch} training...")
             
     for batch_idx, (inputs, targets) in enumerate(dataloader):
 
-        print(f'{epoch}:{batch_idx}', accelerator.is_main_process, batch_idx, inputs.device, targets.device, next(model.parameters()).device)
+        # 获取当前进程的本地排名
+        local_rank = accelerator.state.local_process_index
         
+        print(f"Process {local_rank}, Epoch: {epoch}, Batch Index: {batch_idx}, "
+            f"Inputs Device: {inputs.device}, "
+            f"Targets Device: {targets.device}, "
+            f"Model Device: {next(model.parameters()).device}")  
+          
         # Compute prediction error
         outputs = model(inputs)
         loss = loss_fn(outputs, targets)
@@ -52,40 +50,42 @@ def train(dataloader, model, loss_fn, accelerator, device, optimizer, lr_schedul
         if accelerator.is_local_main_process and batch_idx % 200 == 0:
             print(f'{accelerator.is_main_process}, Train Epoch: {epoch} [{batch_idx * len(inputs)}/{len(dataloader.dataset)} ({100. * batch_idx / len(dataloader):.0f}%)]\tLoss: {loss.item():.6f}')
 
-# 测试函数
-def test_old(dataloader, model, loss_fn, accelerator, device):
-    # eval model
-    model.eval()
+# # 测试函数
+# def test_old(dataloader, model, loss_fn, accelerator, device):
+#     # eval model
+#     model.eval()
 
-    test_loss = 0
-    correct = 0
-    total = 0
+#     test_loss = 0
+#     correct = 0
+#     total = 0
     
-    with torch.no_grad():
-        for inputs, targets in dataloader:
+#     with torch.no_grad():
+#         for inputs, targets in dataloader:
             
-            # Compute prediction error
-            outputs = model(inputs)
-            loss = loss_fn(outputs, targets)
+#             # Compute prediction error
+#             outputs = model(inputs)
+#             loss = loss_fn(outputs, targets)
             
-            # 计算当前GPU上局部批次的损失总和
-            local_batch_size = targets.size(0)
-            local_sum_loss = loss * local_batch_size
+#             # 计算当前GPU上局部批次的损失总和
+#             local_batch_size = targets.size(0)
+#             local_sum_loss = loss * local_batch_size
             
-            # 收集所有GPU上的局部损失总和，并加起来得到全局批次的损失总和，累加到test_loss
-            test_loss += accelerator.gather(local_sum_loss).sum().item()
-            pred = outputs.argmax(dim=1, keepdim=True)
-            correct += accelerator.gather(pred.eq(targets.view_as(pred)).sum()).sum().item()
-            # ====================================
+#             # 收集所有GPU上的局部损失总和，并加起来得到全局批次的损失总和，累加到test_loss
+#             test_loss += accelerator.gather(local_sum_loss).sum().item()
+#             pred = outputs.argmax(dim=1, keepdim=True)
             
-            total += targets.size(0) * accelerator.num_processes  # 总数可以直接累加
+#             correct += accelerator.gather(pred.eq(targets.view_as(pred)).sum()).sum().item()
+#             # ====================================
             
-    test_loss /= total
-    accuracy = 100. * correct / total
+#             total += targets.size(0) * accelerator.num_processes  # 总数可以直接累加
+            
+#     test_loss /= total
+#     accuracy = 100. * correct / total
     
-    if accelerator.is_local_main_process:
-        print(f'Test set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{total} ({accuracy:.0f}%)')
-        
+#     if accelerator.is_local_main_process:
+#         print(f'Test set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{total} ({accuracy:.0f}%)')
+
+# 测试函数
 def test(dataloader, model, loss_fn, accelerator, device):
     model.eval()
 
@@ -105,7 +105,7 @@ def test(dataloader, model, loss_fn, accelerator, device):
             correct_batch  = outputs.argmax(dim=1).eq(targets).sum()
 
             # 累加本卡
-            local_test_loss_sum    += sum_loss_batch
+            local_test_loss_sum += sum_loss_batch
             local_correct_sum += correct_batch
             local_sample_sum  += batch_size
             
@@ -137,18 +137,42 @@ def main():
     lr = config["learning_rate"]
     epochs = config["num_epoch"]   
     optimizer = config["optimizer"]
+    mixed_precision = config["mixed_precision"]
     
-    # 初始化Accelerator
+    # 初始化Accelerator - 先创建基本accelerator以获取进程信息
+
     accelerator = Accelerator()
+    # 获取当前进程信息
+    is_main_process = accelerator.is_main_process
+    
+    # 重新初始化accelerator，主进程包含tracker，其他进程不包含
+    if is_main_process:
+        # 主进程初始化tracker并创建带tracker的accelerator
+        tracker = SwanLabTracker("CIFAR10_TRAING")
+        accelerator = Accelerator(
+            mixed_precision=mixed_precision,
+            log_with=tracker
+        )
+        # 初始化tracker
+        accelerator.init_trackers("CIFAR10_TRAING", config=config)
+    else:
+        # 非主进程只使用混合精度，不使用tracker
+        accelerator = Accelerator(mixed_precision=mixed_precision)
+    
     device = accelerator.device # accelerator自动维护的device
     
-    # 训练可视化
-    tracker = SwanLabTracker("CIFAR10_TRAING") # ,experiment_name=exp_name
-    accelerator = Accelerator(log_with=tracker)
-    accelerator.init_trackers("CIFAR10_TRAING", config=config)
-    
-    # accelerator = Accelerator(mixed_precision=config["mixed_precision"])
 
+    # Init accelerate with swanlab tracker
+    # 初始化Accelerator
+
+    # accelerator = Accelerator()
+    # 训练可视化 ,experiment_name=exp_name
+    # tracker = SwanLabTracker("CIFAR10_TRAING") 
+    # accelerator = Accelerator(log_with=tracker)
+    # accelerator.init_trackers("CIFAR10_TRAING", config=config)
+    
+    # device = accelerator.device # accelerator自动维护的device
+    
     # 加载数据集
     train_dataset = datasets.train_dataset_CIFAR10
     test_dataset = datasets.test_dataset_CIFAR10
@@ -164,7 +188,6 @@ def main():
     
     # 加载模型
     model = get_model().to(device)
-    print(f'initial model device: {next(model.parameters()).device}')
     
     # 定义损失函数
     loss_fn = nn.CrossEntropyLoss()
@@ -181,7 +204,7 @@ def main():
     # Get logger 用处不明，似乎没有也能记录训练日志
     # logger = get_logger(__name__)
 
-    # 检查分配情况
+    # 检查模型和数据的设备分配情况
     print(f"Model is on device: {next(model.parameters()).device}")
     for batch_idx, (inputs, targets) in enumerate(train_dataloader):
         print(f"batch_{batch_idx} inputs are on device: {inputs.device}")
@@ -189,7 +212,6 @@ def main():
 
     # 主训练循环
     for epoch in range(epochs):
-        print(f"Epoch {epoch+1}\n------")
         train(train_dataloader, model, loss_fn, accelerator, device, optimizer, lr_scheduler, epoch+1)
         test(test_dataloader, model, loss_fn, accelerator, device)
 
@@ -197,7 +219,8 @@ def main():
     accelerator.wait_for_everyone()  
     # 等所有卡都训练完了再保存checkpoints
     # accelerator.save_model(my_model, os.path.join("checkpoints", exp_name))
-
+    
+    # unwrapped_model = accelerator.unwrap_model(model) 用哪个？
     accelerator.end_training()
     
     # =================================================
