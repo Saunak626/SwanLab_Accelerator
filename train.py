@@ -2,6 +2,7 @@ import datetime
 import src.datasets.base_dataset as datasets
 import src.optimizers.optim as optimizers
 from src.models.net import *
+from tqdm import tqdm # 导入tqdm
 
 #=================== torch ======================
 import torch
@@ -16,22 +17,23 @@ import swanlab
 from swanlab.integration.accelerate import SwanLabTracker
 
 # 训练函数
-def train(dataloader, model, loss_fn, accelerator, device, optimizer, lr_scheduler, epoch):
+def train(dataloader, model, loss_fn, accelerator, device, optimizer, lr_scheduler, epoch, batch_info=False):
     # train model
     model.train()
     
+    # 仅在主进程创建进度条
     if accelerator.is_local_main_process:
-        print(f"Begin epoch {epoch} training...")
+        progress_bar = tqdm(total=len(dataloader), desc=f"Epoch {epoch} Training", unit="batch")
             
     for batch_idx, (inputs, targets) in enumerate(dataloader):
-
-        # 获取当前进程的本地排名
-        local_rank = accelerator.state.local_process_index
-        
-        print(f"Process {local_rank}, Epoch: {epoch}, Batch Index: {batch_idx}, "
-            f"Inputs Device: {inputs.device}, "
-            f"Targets Device: {targets.device}, "
-            f"Model Device: {next(model.parameters()).device}")  
+        if batch_info: # 根据参数决定是否打印批处理信息
+            # 获取当前进程的本地排名
+            local_rank = accelerator.state.local_process_index
+            
+            print(f"Process {local_rank}, Epoch: {epoch}, Batch Index: {batch_idx}, "
+                f"Inputs Device: {inputs.device}, "
+                f"Targets Device: {targets.device}, "
+                f"Model Device: {next(model.parameters()).device}")  
           
         # Compute prediction error
         outputs = model(inputs)
@@ -47,8 +49,16 @@ def train(dataloader, model, loss_fn, accelerator, device, optimizer, lr_schedul
         accelerator.log({"training_loss": loss, "epoch_num": epoch})
 
         # 多卡训练时只在主进程打印信息，防止同一份信息打印好多遍
-        if accelerator.is_local_main_process and batch_idx % 200 == 0:
-            print(f'{accelerator.is_main_process}, Train Epoch: {epoch} [{batch_idx * len(inputs)}/{len(dataloader.dataset)} ({100. * batch_idx / len(dataloader):.0f}%)]\tLoss: {loss.item():.6f}')
+        if accelerator.is_local_main_process:
+            progress_bar.update(1) # 更新进度条
+            if batch_idx % 200 == 0: # 保留原有的每200个batch打印一次loss的逻辑
+                 # 可以在进度条后附加信息
+                progress_bar.set_postfix_str(f"Loss: {loss.item():.6f}")
+                # 或者直接打印
+                # print(f'Train Epoch: {epoch} [{batch_idx * len(inputs)}/{len(dataloader.dataset)} ({100. * batch_idx / len(dataloader):.0f}%)]\tLoss: {loss.item():.6f}')
+
+    if accelerator.is_local_main_process:
+        progress_bar.close() # 关闭进度条
 
 # # 测试函数
 # def test_old(dataloader, model, loss_fn, accelerator, device):
@@ -86,13 +96,17 @@ def train(dataloader, model, loss_fn, accelerator, device, optimizer, lr_schedul
 #         print(f'Test set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{total} ({accuracy:.0f}%)')
 
 # 测试函数
-def test(dataloader, model, loss_fn, accelerator, device):
+def test(dataloader, model, loss_fn, accelerator, device, epoch):
     model.eval()
 
     # 在本卡上累加的局部量
     local_test_loss_sum = torch.tensor(0.0, device=device)
     local_correct_sum = torch.tensor(0, device=device)
     local_sample_sum  = torch.tensor(0, device=device)
+
+    # 仅在主进程创建测试进度条
+    if accelerator.is_local_main_process:
+        test_progress_bar = tqdm(total=len(dataloader), desc=f"Epoch {epoch} Testing ", unit="batch", position=0, leave=True)
 
     with torch.no_grad():
         for inputs, targets in dataloader:
@@ -108,6 +122,9 @@ def test(dataloader, model, loss_fn, accelerator, device):
             local_test_loss_sum += sum_loss_batch
             local_correct_sum += correct_batch
             local_sample_sum  += batch_size
+            
+            if accelerator.is_local_main_process:
+                test_progress_bar.update(1) # 更新测试进度条
             
     # 全局聚合：收集所有GPU上的局部损失总和，一次性 gather & sum
     total_test_loss = accelerator.gather(local_test_loss_sum).sum()
@@ -130,18 +147,20 @@ def main():
         "batch_num": 2048,
         "learning_rate": 1e-4,
         "mixed_precision": "fp16", # fp16/bf16/no
-        "optimizer": "adamW", 
+        "optimizer": "adamW",
+        "batch_info": False, # 新增配置：控制是否打印详细的批处理信息
     }
 
     BATCH_SIZE = config["batch_num"]
     lr = config["learning_rate"]
     epochs = config["num_epoch"]   
-    optimizer = config["optimizer"]
+    optimizer_name = config["optimizer"] # 变量名修改避免与optimizer实例混淆
     mixed_precision = config["mixed_precision"]
+    batch_info_flag = config["batch_info"] # 获取打印标志
     
-    # 初始化Accelerator - 先创建基本accelerator以获取进程信息
-
+    # 初始化Accelerator
     accelerator = Accelerator()
+    
     # 获取当前进程信息
     is_main_process = accelerator.is_main_process
     
@@ -159,19 +178,15 @@ def main():
         # 非主进程只使用混合精度，不使用tracker
         accelerator = Accelerator(mixed_precision=mixed_precision)
     
-    device = accelerator.device # accelerator自动维护的device
-    
 
-    # Init accelerate with swanlab tracker
-    # 初始化Accelerator
-
-    # accelerator = Accelerator()
+    # 初始化Accelerator 只有 MULTI_GPU 能这样初始化
     # 训练可视化 ,experiment_name=exp_name
     # tracker = SwanLabTracker("CIFAR10_TRAING") 
     # accelerator = Accelerator(log_with=tracker)
     # accelerator.init_trackers("CIFAR10_TRAING", config=config)
     
-    # device = accelerator.device # accelerator自动维护的device
+    
+    device = accelerator.device # accelerator自动维护的device
     
     # 加载数据集
     train_dataset = datasets.train_dataset_CIFAR10
@@ -187,33 +202,41 @@ def main():
         break    
     
     # 加载模型
-    model = get_model().to(device)
+    model = get_model()
     
     # 定义损失函数
     loss_fn = nn.CrossEntropyLoss()
     
     # 定义优化器
-    optimizer = optimizers.get_optimizer(model, optimizer, lr)
+    optimizer_instance = optimizers.get_optimizer(model, optimizer_name, lr) # 使用optimizer_name
     
     # 定义学习率
-    lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer=optimizer, max_lr=25*lr, epochs=epochs, steps_per_epoch=len(train_dataloader))
+    lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer=optimizer_instance, max_lr=25*lr, epochs=epochs, steps_per_epoch=len(train_dataloader)) # 使用optimizer_instance
 
     # 使用accelerate包装模型、优化器和数据加载器
-    model, optimizer, lr_scheduler, train_dataloader, test_dataloader = accelerator.prepare(model, optimizer, lr_scheduler, train_dataloader, test_dataloader)
+    model, optimizer_instance, lr_scheduler, train_dataloader, test_dataloader = accelerator.prepare(model, optimizer_instance, lr_scheduler, train_dataloader, test_dataloader) # 使用optimizer_instance
 
     # Get logger 用处不明，似乎没有也能记录训练日志
-    # logger = get_logger(__name__)
+    logger = get_logger(__name__)
 
     # 检查模型和数据的设备分配情况
-    print(f"Model is on device: {next(model.parameters()).device}")
-    for batch_idx, (inputs, targets) in enumerate(train_dataloader):
-        print(f"batch_{batch_idx} inputs are on device: {inputs.device}")
-        print(f"batch_{batch_idx} targets are on device: {targets.device}")
+    if batch_info_flag and accelerator.is_local_main_process: # 只在需要详细信息且是主进程时打印
+        print(f"Model is on device: {next(model.parameters()).device}")
+        for batch_idx, (inputs, targets) in enumerate(train_dataloader):
+            print(f"batch_{batch_idx} inputs are on device: {inputs.device}")
+            print(f"batch_{batch_idx} targets are on device: {targets.device}")
+            if batch_idx > 2: # 示例：只打印前几个批次
+                break
 
     # 主训练循环
-    for epoch in range(epochs):
-        train(train_dataloader, model, loss_fn, accelerator, device, optimizer, lr_scheduler, epoch+1)
-        test(test_dataloader, model, loss_fn, accelerator, device)
+    for epoch_num in range(epochs):
+        current_epoch = epoch_num + 1
+        
+        # 移除原先的Epoch打印，交由tqdm处理
+        # print(f"Epoch {current_epoch}\n------") 
+        
+        train(train_dataloader, model, loss_fn, accelerator, device, optimizer_instance, lr_scheduler, current_epoch, batch_info=batch_info_flag) 
+        test(test_dataloader, model, loss_fn, accelerator, device, current_epoch) 
 
 
     accelerator.wait_for_everyone()  
