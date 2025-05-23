@@ -1,4 +1,6 @@
+import os
 import datetime
+import argparse # 新增: 导入 argparse 模块，用于解析命令行参数
 import src.datasets.base_dataset as datasets
 import src.optimizers.optim as optimizers
 from src.models.net import *
@@ -139,24 +141,45 @@ def test(dataloader, model, loss_fn, accelerator, device, epoch):
               f'Accuracy: {total_correct}/{total_samples} ({accuracy:.0f}%)')
         
 def main():
+    parser = argparse.ArgumentParser(description="Train a model with configurable GPU for direct Python execution.")
+    parser.add_argument(
+        "--gpu_id",
+        type=str, # gpu_id: 字符串类型，允许指定单个或多个GPU
+        default='3', # default=None: 脚本将不主动修改 CUDA_VISIBLE_DEVICES
+        help="Specify the GPU ID(s) to use."
+    )
+    # args: 解析后的命令行参数对象
+    args, _ = parser.parse_known_args()
+
+    # 判断是否在分布式训练环境中运行
+    is_launched_by_accelerate = 'LOCAL_RANK' in os.environ
+
+    if not is_launched_by_accelerate:
+        print(f"[INFO] Running with 'python train.py', setting CUDA_VISIBLE_DEVICES='{args.gpu_id}'")
+        
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
+    else: # accelerate launch 启动
+        print(f"[INFO] Running with 'accelerate launch'. GPU selection will be handled by Accelerate.")
+
     set_seed(42)
     
     # hyperparameters
     config = {
-        "num_epoch": 10,
-        "batch_num": 2048,
-        "learning_rate": 1e-4,
-        "mixed_precision": "fp16", # fp16/bf16/no
-        "optimizer": "adamW",
-        "batch_info": False, # 新增配置：控制是否打印详细的批处理信息
+        "num_epoch": 10, # 训练的总轮数
+        "batch_num": 1024, # 每个批次的样本数量
+        "learning_rate": 1e-4, # l初始学习率
+        "mixed_precision": "fp16", # 混合精度训练配置 ('fp16', 'bf16', or 'no')
+        "optimizer": "adamW", # 使用的优化器名称
+        "batch_info": False, # 是否打印详细的批处理信息的标志
     }
-
+    
+    # 从配置中获取参数
     BATCH_SIZE = config["batch_num"]
     lr = config["learning_rate"]
-    epochs = config["num_epoch"]   
-    optimizer_name = config["optimizer"] # 变量名修改避免与optimizer实例混淆
+    epochs = config["num_epoch"]
+    optimizer_name = config["optimizer"]
     mixed_precision = config["mixed_precision"]
-    batch_info_flag = config["batch_info"] # 获取打印标志
+    batch_info_flag = config["batch_info"]
     
     # 初始化Accelerator
     accelerator = Accelerator()
@@ -164,13 +187,12 @@ def main():
     # 获取当前进程信息
     is_main_process = accelerator.is_main_process
     
-    # 重新初始化accelerator，主进程包含tracker，其他进程不包含
     if is_main_process:
         # 主进程初始化tracker并创建带tracker的accelerator
         tracker = SwanLabTracker("CIFAR10_TRAING")
         accelerator = Accelerator(
-            mixed_precision=mixed_precision,
-            log_with=tracker
+            log_with=tracker,
+            mixed_precision=mixed_precision
         )
         # 初始化tracker
         accelerator.init_trackers("CIFAR10_TRAING", config=config)
@@ -184,7 +206,6 @@ def main():
     # tracker = SwanLabTracker("CIFAR10_TRAING") 
     # accelerator = Accelerator(log_with=tracker)
     # accelerator.init_trackers("CIFAR10_TRAING", config=config)
-    
     
     device = accelerator.device # accelerator自动维护的device
     
@@ -231,9 +252,6 @@ def main():
     # 主训练循环
     for epoch_num in range(epochs):
         current_epoch = epoch_num + 1
-        
-        # 移除原先的Epoch打印，交由tqdm处理
-        # print(f"Epoch {current_epoch}\n------") 
         
         train(train_dataloader, model, loss_fn, accelerator, device, optimizer_instance, lr_scheduler, current_epoch, batch_info=batch_info_flag) 
         test(test_dataloader, model, loss_fn, accelerator, device, current_epoch) 
