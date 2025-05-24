@@ -1,7 +1,8 @@
 pytorch-template/
 data/
 checkpoints/
-train_test.py
+test.py
+
 *pyc 
 *pkl
 *bin

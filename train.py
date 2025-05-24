@@ -4,7 +4,7 @@ import argparse # 新增: 导入 argparse 模块，用于解析命令行参数
 import src.datasets.base_dataset as datasets
 import src.optimizers.optim as optimizers
 from src.models.net import *
-from tqdm import tqdm # 导入tqdm
+from tqdm import tqdm
 
 #=================== torch ======================
 import torch
@@ -62,41 +62,6 @@ def train(dataloader, model, loss_fn, accelerator, device, optimizer, lr_schedul
     if accelerator.is_local_main_process:
         progress_bar.close() # 关闭进度条
 
-# # 测试函数
-# def test_old(dataloader, model, loss_fn, accelerator, device):
-#     # eval model
-#     model.eval()
-
-#     test_loss = 0
-#     correct = 0
-#     total = 0
-    
-#     with torch.no_grad():
-#         for inputs, targets in dataloader:
-            
-#             # Compute prediction error
-#             outputs = model(inputs)
-#             loss = loss_fn(outputs, targets)
-            
-#             # 计算当前GPU上局部批次的损失总和
-#             local_batch_size = targets.size(0)
-#             local_sum_loss = loss * local_batch_size
-            
-#             # 收集所有GPU上的局部损失总和，并加起来得到全局批次的损失总和，累加到test_loss
-#             test_loss += accelerator.gather(local_sum_loss).sum().item()
-#             pred = outputs.argmax(dim=1, keepdim=True)
-            
-#             correct += accelerator.gather(pred.eq(targets.view_as(pred)).sum()).sum().item()
-#             # ====================================
-            
-#             total += targets.size(0) * accelerator.num_processes  # 总数可以直接累加
-            
-#     test_loss /= total
-#     accuracy = 100. * correct / total
-    
-#     if accelerator.is_local_main_process:
-#         print(f'Test set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{total} ({accuracy:.0f}%)')
-
 # 测试函数
 def test(dataloader, model, loss_fn, accelerator, device, epoch):
     model.eval()
@@ -141,25 +106,15 @@ def test(dataloader, model, loss_fn, accelerator, device, epoch):
               f'Accuracy: {total_correct}/{total_samples} ({accuracy:.0f}%)')
         
 def main():
-    parser = argparse.ArgumentParser(description="Train a model with configurable GPU for direct Python execution.")
+    parser = argparse.ArgumentParser(description="Python启动模式的指令配置")
     parser.add_argument(
         "--gpu_id",
         type=str, # gpu_id: 字符串类型，允许指定单个或多个GPU
-        default='3', # default=None: 脚本将不主动修改 CUDA_VISIBLE_DEVICES
+        default='3', # default=None
         help="Specify the GPU ID(s) to use."
     )
     # args: 解析后的命令行参数对象
     args, _ = parser.parse_known_args()
-
-    # 判断是否在分布式训练环境中运行
-    is_launched_by_accelerate = 'LOCAL_RANK' in os.environ
-
-    if not is_launched_by_accelerate:
-        print(f"[INFO] Running with 'python train.py', setting CUDA_VISIBLE_DEVICES='{args.gpu_id}'")
-        
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
-    else: # accelerate launch 启动
-        print(f"[INFO] Running with 'accelerate launch'. GPU selection will be handled by Accelerate.")
 
     set_seed(42)
     
@@ -168,7 +123,7 @@ def main():
         "num_epoch": 10, # 训练的总轮数
         "batch_num": 1024, # 每个批次的样本数量
         "learning_rate": 1e-4, # l初始学习率
-        "mixed_precision": "fp16", # 混合精度训练配置 ('fp16', 'bf16', or 'no')
+        "mixed_precision": "fp16", # 训练精度 ('fp16'/'bf16'/'no')
         "optimizer": "adamW", # 使用的优化器名称
         "batch_info": False, # 是否打印详细的批处理信息的标志
     }
@@ -181,33 +136,38 @@ def main():
     mixed_precision = config["mixed_precision"]
     batch_info_flag = config["batch_info"]
     
-    # 初始化Accelerator
-    accelerator = Accelerator()
+    # 1. 判断是不是由 accelerate 启动（分布式）
+    is_distributed = "LOCAL_RANK" in os.environ
+
+    # 2. 如果是单卡，用 args.gpu_id 控制可见 GPU
+    if not is_distributed:
+        print(f"[INFO] Running with 'python train.py', setting CUDA_VISIBLE_DEVICES={args.gpu_id}")
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
+
+    # 3. 解析全局 rank，判断主进程
+    global_rank = int(os.environ.get("RANK", 0))
+    is_main = (global_rank == 0)
+
+    # 4. 根据分布式＆主进程决定要不要传 tracker 给 Accelerator
     
-    # 获取当前进程信息
-    is_main_process = accelerator.is_main_process
+    # DeepSeed 模式下下必须要先初始化一次 Accelerator
+    accelerator = Accelerator(mixed_precision=mixed_precision)
     
-    if is_main_process:
+    if is_main:
         # 主进程初始化tracker并创建带tracker的accelerator
+        # 训练可视化 ,experiment_name=exp_name
         tracker = SwanLabTracker("CIFAR10_TRAING")
         accelerator = Accelerator(
             log_with=tracker,
-            mixed_precision=mixed_precision
         )
         # 初始化tracker
         accelerator.init_trackers("CIFAR10_TRAING", config=config)
-    else:
-        # 非主进程只使用混合精度，不使用tracker
-        accelerator = Accelerator(mixed_precision=mixed_precision)
+        
+    # 5. 打印确认
+    print(f"Process {accelerator.local_process_index} using device: {accelerator.device}, "
+          f"is_main: {accelerator.is_main_process}")
     
-
-    # 初始化Accelerator 只有 MULTI_GPU 能这样初始化
-    # 训练可视化 ,experiment_name=exp_name
-    # tracker = SwanLabTracker("CIFAR10_TRAING") 
-    # accelerator = Accelerator(log_with=tracker)
-    # accelerator.init_trackers("CIFAR10_TRAING", config=config)
-    
-    device = accelerator.device # accelerator自动维护的device
+    device = accelerator.device # accelerator自动维护device
     
     # 加载数据集
     train_dataset = datasets.train_dataset_CIFAR10
@@ -217,10 +177,10 @@ def main():
     train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
     
-    for X, y in test_dataloader:
-        print(f"Shape of X [N, C, H, W]: {X.shape}")
-        print(f"Shape of y: {y.shape} {y.dtype}")
-        break    
+    # 获取并打印第一个样本
+    X, y = next(iter(test_dataloader))
+    print(f"Shape of X [N, C, H, W]: {X.shape}")
+    print(f"Shape of y: {y.shape} {y.dtype}")
     
     # 加载模型
     model = get_model()
@@ -229,13 +189,13 @@ def main():
     loss_fn = nn.CrossEntropyLoss()
     
     # 定义优化器
-    optimizer_instance = optimizers.get_optimizer(model, optimizer_name, lr) # 使用optimizer_name
+    optimizer = optimizers.get_optimizer(model, optimizer_name, lr) 
     
     # 定义学习率
-    lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer=optimizer_instance, max_lr=25*lr, epochs=epochs, steps_per_epoch=len(train_dataloader)) # 使用optimizer_instance
+    lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer=optimizer, max_lr=25*lr, epochs=epochs, steps_per_epoch=len(train_dataloader)) 
 
     # 使用accelerate包装模型、优化器和数据加载器
-    model, optimizer_instance, lr_scheduler, train_dataloader, test_dataloader = accelerator.prepare(model, optimizer_instance, lr_scheduler, train_dataloader, test_dataloader) # 使用optimizer_instance
+    model, optimizer, lr_scheduler, train_dataloader, test_dataloader = accelerator.prepare(model, optimizer, lr_scheduler, train_dataloader, test_dataloader)
 
     # Get logger 用处不明，似乎没有也能记录训练日志
     logger = get_logger(__name__)
@@ -253,9 +213,8 @@ def main():
     for epoch_num in range(epochs):
         current_epoch = epoch_num + 1
         
-        train(train_dataloader, model, loss_fn, accelerator, device, optimizer_instance, lr_scheduler, current_epoch, batch_info=batch_info_flag) 
+        train(train_dataloader, model, loss_fn, accelerator, device, optimizer, lr_scheduler, current_epoch, batch_info=batch_info_flag) 
         test(test_dataloader, model, loss_fn, accelerator, device, current_epoch) 
-
 
     accelerator.wait_for_everyone()  
     # 等所有卡都训练完了再保存checkpoints
