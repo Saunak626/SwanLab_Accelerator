@@ -1,7 +1,9 @@
 import os
 import datetime
 import argparse # 新增: 导入 argparse 模块，用于解析命令行参数
-import src.datasets.base_dataset as datasets
+# import src.datasets.base_dataset as datasets
+from src.datasets.base_dataset import datasets_CIFAR10 as datasets_CIFAR10
+
 import src.optimizers.optim as optimizers
 from src.models.net import *
 from tqdm import tqdm
@@ -24,19 +26,22 @@ def train(dataloader, model, loss_fn, accelerator, device, optimizer, lr_schedul
     model.train()
     
     # 仅在主进程创建进度条
-    if accelerator.is_local_main_process:
-        progress_bar = tqdm(total=len(dataloader), desc=f"Epoch {epoch} Training", unit="batch")
+    if accelerator.is_main_process:
+        progress_bar = tqdm(total=len(dataloader), desc=f"Epoch {epoch} Training", unit="batch", position=0, leave=True)
             
     for batch_idx, (inputs, targets) in enumerate(dataloader):
-        if batch_info: # 根据参数决定是否打印批处理信息
+        
+        # 根据参数打印batch处理信息
+        if batch_info: 
             # 获取当前进程的本地排名
             local_rank = accelerator.state.local_process_index
             
-            print(f"Process {local_rank}, Epoch: {epoch}, Batch Index: {batch_idx}, "
-                f"Inputs Device: {inputs.device}, "
-                f"Targets Device: {targets.device}, "
-                f"Model Device: {next(model.parameters()).device}")  
-          
+            print(f"Process {local_rank}, Epoch: {epoch}, "
+                  f"Batch Index: {batch_idx}, "
+                  f"Inputs Device: {inputs.device}, "
+                  f"Targets Device: {targets.device}, "
+                  f"Model Device: {next(model.parameters()).device}")  
+            
         # Compute prediction error
         outputs = model(inputs)
         loss = loss_fn(outputs, targets)
@@ -48,18 +53,16 @@ def train(dataloader, model, loss_fn, accelerator, device, optimizer, lr_schedul
     
         lr_scheduler.step()
         
-        accelerator.log({"training_loss": loss, "epoch_num": epoch})
+        accelerator.log({"train/loss": loss, "epoch_num": epoch})
 
-        # 多卡训练时只在主进程打印信息，防止同一份信息打印好多遍
-        if accelerator.is_local_main_process:
+        # 多卡训练时只在主进程打印信息
+        if accelerator.is_main_process:
             progress_bar.update(1) # 更新进度条
-            if batch_idx % 200 == 0: # 保留原有的每200个batch打印一次loss的逻辑
-                 # 可以在进度条后附加信息
+            if batch_idx % 200 == 0:
+                # 可以在进度条后附加信息
                 progress_bar.set_postfix_str(f"Loss: {loss.item():.6f}")
-                # 或者直接打印
-                # print(f'Train Epoch: {epoch} [{batch_idx * len(inputs)}/{len(dataloader.dataset)} ({100. * batch_idx / len(dataloader):.0f}%)]\tLoss: {loss.item():.6f}')
 
-    if accelerator.is_local_main_process:
+    if accelerator.is_main_process:
         progress_bar.close() # 关闭进度条
 
 # 测试函数
@@ -72,7 +75,7 @@ def test(dataloader, model, loss_fn, accelerator, device, epoch):
     local_sample_sum  = torch.tensor(0, device=device)
 
     # 仅在主进程创建测试进度条
-    if accelerator.is_local_main_process:
+    if accelerator.is_main_process:
         test_progress_bar = tqdm(total=len(dataloader), desc=f"Epoch {epoch} Testing ", unit="batch", position=0, leave=True)
 
     with torch.no_grad():
@@ -90,21 +93,40 @@ def test(dataloader, model, loss_fn, accelerator, device, epoch):
             local_correct_sum += correct_batch
             local_sample_sum  += batch_size
             
-            if accelerator.is_local_main_process:
+            # —— 按 batch 记录 loss & acc ——  
+            batch_acc = 100. * correct_batch.item() / batch_size
+            accelerator.log({
+                "test/loss_batch": loss.item(),
+                "test/acc_batch":  batch_acc,
+            })  # 不传 step，就默认用全局 batch-step
+    
+            if accelerator.is_main_process:
                 test_progress_bar.update(1) # 更新测试进度条
             
     # 全局聚合：收集所有GPU上的局部损失总和，一次性 gather & sum
-    total_test_loss = accelerator.gather(local_test_loss_sum).sum()
-    total_correct = accelerator.gather(local_correct_sum).sum()
-    total_samples = accelerator.gather(local_sample_sum).sum()
+    # total_test_loss = accelerator.gather(local_test_loss_sum).sum()
+    # total_correct = accelerator.gather(local_correct_sum).sum()
+    # total_samples = accelerator.gather(local_sample_sum).sum()
+
+    # 全进程 all-reduce
+    total_test_loss    = accelerator.reduce(local_test_loss_sum,  reduction="sum")
+    total_correct = accelerator.reduce(local_correct_sum,    reduction="sum")
+    total_samples = accelerator.reduce(local_sample_sum,     reduction="sum")
 
     # 只在主进程计算并打印
     if accelerator.is_main_process:
         avg_loss = (total_test_loss / total_samples).item()
         accuracy = 100. * total_correct.item() / total_samples.item()
-        print(f'Test set: Average loss: {avg_loss:.4f}, '
+        print(f'Epoch {epoch} '
+              f'Test set: Average loss: {avg_loss:.4f}, '
               f'Accuracy: {total_correct}/{total_samples} ({accuracy:.0f}%)')
         
+        accelerator.log({
+        "test/loss": avg_loss,
+        "test/accuracy": accuracy}, 
+        step=epoch)
+        
+    
 def main():
     parser = argparse.ArgumentParser(description="Python启动模式的指令配置")
     parser.add_argument(
@@ -112,6 +134,13 @@ def main():
         type=str, # gpu_id: 字符串类型，允许指定单个或多个GPU
         default='3', # default=None
         help="Specify the GPU ID(s) to use."
+    )
+    # 添加 --data_path 参数
+    parser.add_argument(
+        "--data_path",
+        type=str,
+        default='./data', # 默认值与 base_dataset.py 一致
+        help="Specify the root directory for datasets."
     )
     # args: 解析后的命令行参数对象
     args, _ = parser.parse_known_args()
@@ -170,8 +199,10 @@ def main():
     device = accelerator.device # accelerator自动维护device
     
     # 加载数据集
-    train_dataset = datasets.train_dataset_CIFAR10
-    test_dataset = datasets.test_dataset_CIFAR10
+    # train_dataset = datasets.train_dataset_CIFAR10
+    # test_dataset = datasets.test_dataset_CIFAR10
+    
+    train_dataset, test_dataset = datasets_CIFAR10(root=args.data_path)
     
     # Create data loaders
     train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
@@ -201,7 +232,7 @@ def main():
     logger = get_logger(__name__)
 
     # 检查模型和数据的设备分配情况
-    if batch_info_flag and accelerator.is_local_main_process: # 只在需要详细信息且是主进程时打印
+    if batch_info_flag and accelerator.is_main_process: # 只在需要详细信息且是主进程时打印
         print(f"Model is on device: {next(model.parameters()).device}")
         for batch_idx, (inputs, targets) in enumerate(train_dataloader):
             print(f"batch_{batch_idx} inputs are on device: {inputs.device}")

@@ -1,0 +1,68 @@
+# Base Configuration - Common settings for all experiments
+
+project:
+  name: "MyDLFrameworkProject" # Project name for logging and outputs
+  seed: 42 # Global random seed for reproducibility
+  # tracker: "tensorboard" # Options: "tensorboard", "wandb", "comet_ml", "mlflow", "swanlab"
+  # exp_suffix: "default" # Optional suffix for experiment names
+
+accelerator:
+  mixed_precision: "no" # 'no', 'fp16', 'bf16'
+  gradient_accumulation_steps: 1
+  # find_unused_parameters: false # For DDP, if model has unused parameters
+
+dataset:
+  name: "" # To be specified by experiment config (e.g., "cifar10")
+  path: "./data" # Default path to datasets directory
+  num_workers: 4
+  pin_memory: true
+  # transforms: # To be specified by experiment config
+  #   train: []
+  #   eval: []
+  # params: {} # Other dataset-specific parameters
+
+model:
+  name: "" # To be specified by experiment config (e.g., "resnet18_cifar")
+  # params: {} # Model-specific parameters (e.g., dropout_rate, num_layers)
+  # num_classes: null # Usually inferred from dataset, or can be set here
+
+loss:
+  name: "" # To be specified by experiment config (e.g., "cross_entropy")
+  # params: {} # Loss function-specific parameters (e.g., label_smoothing)
+
+optimizer:
+  name: "adamw" # Default optimizer
+  params:
+    lr: 0.001
+    weight_decay: 0.01
+  # Add other optimizer params like betas, eps, etc.
+
+scheduler: # Optional
+  name: "" # e.g., "one_cycle_lr", "cosine_annealing"
+  # params: {} # Scheduler-specific parameters
+  #   # Example for OneCycleLR:
+  #   # max_lr: 0.01 # Often same or higher than optimizer lr
+  #   # pct_start: 0.3
+  #   # anneal_strategy: 'cos'
+
+training:
+  num_epochs: 10
+  batch_size: 64
+  log_interval: 50    # Log training stats every N batches
+  eval_interval: 1    # Perform evaluation every N epochs
+  save_interval: 1    # Save checkpoint every N epochs
+  # early_stopping_patience: null # Number of epochs to wait for improvement
+
+evaluation:
+  batch_size: 128 # Can be same as training or different
+  # metrics: # To be specified by experiment config
+    # accuracy: {}
+    # f1_score: { average: 'macro'}
+
+# SwanLab specific configuration (if using SwanLab)
+# swanlab:
+#   experiment_name: null # Optional: if null, SwanLab generates one. Can be set by specific configs.
+#   # params: # Other SwanLab specific initialization parameters
+#   #   log_code: true
+
+# You can add other top-level keys for different components or settings 

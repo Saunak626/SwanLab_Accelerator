@@ -1,9 +1,15 @@
-pytorch-template/
+__pycache__/
 data/
 checkpoints/
-test.py
 
 *pyc 
 *pkl
 *bin
 *pt
+*pth
+
+# 临时文件
+pytorch-template/
+visualization
+ddp_accelerate.py
+test.py

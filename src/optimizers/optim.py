@@ -1,5 +1,4 @@
 import torch
-from torch import nn, optim
 
 def get_optimizer(net, optim, lr):
     #优化器选择
