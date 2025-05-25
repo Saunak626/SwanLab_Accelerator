@@ -19,12 +19,13 @@ tqdm==4.67.1
 XlsxWriter==3.2.3
 
 deepspeed
-accelerate
+accelerate>=0.20.0
 omegaconf
 pyyaml
 swanlab
-# torch
-# torchvision
+torch>=1.9.0
+torchvision>=0.10.0
+safetensors>=0.3.0
 # torchaudio
 # numpy
 # scikit-learn

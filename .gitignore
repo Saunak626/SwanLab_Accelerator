@@ -1,12 +1,16 @@
 __pycache__/
 data/
+result/
 checkpoints/
+zero_to_fp32.py
 
 *pyc 
 *pkl
 *bin
 *pt
 *pth
+*npz
+
 
 # 临时文件
 pytorch-template/
